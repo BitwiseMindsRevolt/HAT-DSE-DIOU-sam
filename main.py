@@ -16,7 +16,7 @@ from eval import evaluation_detection
 from tensorboardX import SummaryWriter
 from dataset import VideoDataSet
 from models import MYNET, SuppressNet
-from loss_func import cls_loss_func, regress_loss_func
+from loss_func import cls_loss_func, regress_loss_func, diou_loss_func
 from functools import *
 
 def setup_multi_gpu():
@@ -39,43 +39,44 @@ def train_one_epoch(opt, model, train_dataset, optimizer, warmup=False):
     epoch_cost = 0
     epoch_cost_cls = 0
     epoch_cost_reg = 0
-    
+    epoch_cost_diou = 0
+
     total_iter = len(train_dataset)//opt['batch_size']
-    
+    use_diou = bool(opt.get('diou', False))
+
     for n_iter,(input_data,cls_label,reg_label,_) in enumerate(tqdm(train_loader)):
 
         if warmup:
             for g in optimizer.param_groups:
                 g['lr'] = n_iter * (opt['lr']) / total_iter
-        
+
         # Move data to GPU (DataParallel will handle distribution)
         input_data = input_data.float().cuda()
         cls_label = cls_label.cuda()
         reg_label = reg_label.cuda()
-        
-        act_cls, act_reg = model(input_data)
-        
-        cost_reg = 0
-        cost_cls = 0
 
-        loss = cls_loss_func(cls_label, act_cls, use_focal=True)
-        cost_cls = loss
-            
-        epoch_cost_cls += cost_cls.detach().cpu().item()    
-               
-        loss = regress_loss_func(reg_label, act_reg)
-        cost_reg = loss  
-        epoch_cost_reg += cost_reg.detach().cpu().item()   
-        
-        cost = opt['alpha']*cost_cls + opt['beta']*cost_reg    
-                
-        epoch_cost += cost.detach().cpu().item() 
+        act_cls, act_reg = model(input_data)
+
+        cost_cls = cls_loss_func(cls_label, act_cls, use_focal=True)
+        epoch_cost_cls += cost_cls.detach().cpu().item()
+
+        cost_reg = regress_loss_func(reg_label, act_reg)
+        epoch_cost_reg += cost_reg.detach().cpu().item()
+
+        cost = opt['alpha']*cost_cls + opt['beta']*cost_reg
+
+        if use_diou:
+            cost_diou = diou_loss_func(reg_label, act_reg, opt['anchors'])
+            epoch_cost_diou += cost_diou.detach().cpu().item()
+            cost = cost + opt['diou_weight'] * cost_diou
+
+        epoch_cost += cost.detach().cpu().item()
 
         optimizer.zero_grad()
         cost.backward()
-        optimizer.step()   
-                
-    return n_iter, epoch_cost, epoch_cost_cls, epoch_cost_reg
+        optimizer.step()
+
+    return n_iter, epoch_cost, epoch_cost_cls, epoch_cost_reg, epoch_cost_diou
 
 def eval_one_epoch(opt, model, test_dataset):
     cls_loss, reg_loss, tot_loss, output_cls, output_reg, labels_cls, labels_reg, working_time, total_frames = eval_frame(opt, model, test_dataset)
@@ -128,14 +129,22 @@ def train(opt):
             warmup = False
         
         model.train()
-        n_iter, epoch_cost, epoch_cost_cls, epoch_cost_reg = train_one_epoch(opt, model, train_dataset, optimizer, warmup)
-            
+        n_iter, epoch_cost, epoch_cost_cls, epoch_cost_reg, epoch_cost_diou = train_one_epoch(opt, model, train_dataset, optimizer, warmup)
+
         writer.add_scalars('data/cost', {'train': epoch_cost/(n_iter+1)}, n_epoch)
-        print("training loss(epoch %d): %.03f, cls - %f, reg - %f, lr - %f"%(n_epoch,
-                                                                            epoch_cost/(n_iter+1),
-                                                                            epoch_cost_cls/(n_iter+1),
-                                                                            epoch_cost_reg/(n_iter+1),
-                                                                            optimizer.param_groups[-1]["lr"]))
+        if opt.get('diou', False):
+            print("training loss(epoch %d): %.03f, cls - %f, reg - %f, diou - %f, lr - %f"%(n_epoch,
+                                                                                epoch_cost/(n_iter+1),
+                                                                                epoch_cost_cls/(n_iter+1),
+                                                                                epoch_cost_reg/(n_iter+1),
+                                                                                epoch_cost_diou/(n_iter+1),
+                                                                                optimizer.param_groups[-1]["lr"]))
+        else:
+            print("training loss(epoch %d): %.03f, cls - %f, reg - %f, lr - %f"%(n_epoch,
+                                                                                epoch_cost/(n_iter+1),
+                                                                                epoch_cost_cls/(n_iter+1),
+                                                                                epoch_cost_reg/(n_iter+1),
+                                                                                optimizer.param_groups[-1]["lr"]))
         
         scheduler.step()
         model.eval()
@@ -621,6 +630,8 @@ if __name__ == '__main__':
 
     print("[Config] DSE (Dual-Scale Temporal Encoder): {}".format(
         "ENABLED" if opt.get('DSE', False) else "DISABLED (baseline MyNet only)"))
+    print("[Config] DIoU regression loss: {}".format(
+        "ENABLED (w={})".format(opt.get('diou_weight', 1.0)) if opt.get('diou', False) else "DISABLED"))
 
     main(opt)
     while(opt['wterm']):
