@@ -117,6 +117,18 @@ def parse_opt():
         type=float,
         default=1.0,
         help='Coefficient for the DIoU loss when --diou is enabled.')
+    parser.add_argument(
+        '--LRDSE',
+        default=False,
+        action='store_true',
+        help='Enable Length-Routed Dual-Scale Encoding. Each anchor gets a memory mixed by '
+             'a length-conditioned weight alpha(L) between the local (conv) and global '
+             '(self-attention) branches of DSE. Requires --DSE.')
+    parser.add_argument(
+        '--router_hidden',
+        type=int,
+        default=32,
+        help='Hidden width of the length-router MLP when --LRDSE is enabled.')
 
     # Training settings
     parser.add_argument(
